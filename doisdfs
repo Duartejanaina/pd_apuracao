@@ -1,0 +1,155 @@
+import pandas as pd
+import numpy as np
+import os
+import gspread
+from google.oauth2.service_account import Credentials
+from reportlab.lib.pagesizes import letter
+from reportlab.lib.utils import ImageReader
+from pydrive.auth import GoogleAuth
+from pydrive.drive import GoogleDrive
+from datetime import datetime
+import numpy as np
+
+
+
+
+scopes = ["https://www.googleapis.com/auth/spreadsheets"]
+
+
+# Conector
+gc = gspread.service_account(filename="arquivo JSON do Google")
+
+
+# Planilha de fiscalização
+fiscalizacao = gc.open_by_key("chave da planilha no Google")
+worksheet = fiscalizacao.worksheet("Respostas ao formulário 1")
+fiscalizacaoAjuste = worksheet.get_all_values()
+
+#Ajuste na base
+apuracaoFiscalizacao = pd.DataFrame(fiscalizacaoAjuste)
+apuracaoFiscalizacao = pd.DataFrame(fiscalizacaoAjuste[1:], columns=fiscalizacaoAjuste[0])
+
+
+df = apuracaoFiscalizacao
+
+#Criando dois datas Frames
+colunasFiscalizacao = ['Data da fiscalização dd/mm/aaaa','Veículo','Horário de verificação da irregularidade']
+dfFiscalizacao = df[colunasFiscalizacao]
+
+# Renomear colunas
+dfFiscalizacao = dfFiscalizacao.rename(columns={'Data da fiscalização dd/mm/aaaa': 'Data', 'Horário de verificação da irregularidade': 'Horario_Irregularidade'})
+
+# Descartar linhas com Data vazia
+dfFiscalizacao = dfFiscalizacao.dropna(subset=['Data'])
+colunasRetorno = ['Data da fiscalização dd/mm/aaaa','Data da fiscalização de retorno: dd/mm/aaaa','Horário de verificação:',  'Veículo', 'Tipo_Irregularidade']
+# Criar uma cópia do DataFrame
+dfRetorno = df[colunasRetorno].copy()
+
+# Preencher coluna 'Data da fiscalização dd/mm/aaaa' com 'Data da fiscalização de retorno: dd/mm/aaaa' quando estiver vazia
+dfRetorno.loc[dfRetorno['Data da fiscalização dd/mm/aaaa'] == '', 'Data da fiscalização dd/mm/aaaa'] = dfRetorno['Data da fiscalização de retorno: dd/mm/aaaa']
+
+condition_ar_condicionado = dfRetorno['Tipo_Irregularidade'] == 'Ar-condicionado.'
+dfRetorno.loc[condition_ar_condicionado, 'Horário de verificação:'] = dfRetorno.loc[condition_ar_condicionado, 'Horário de verificação:'].replace('', '23:59:00')
+
+# Preencher horários vazios com valores de 'Horario_Irregularidade' se 'Tipo_Irregularidade' for 'Letreiro'
+condition_letreiro = dfRetorno['Tipo_Irregularidade'] == 'Letreiro'
+dfRetorno.loc[condition_letreiro, 'Horário de verificação:'] = dfFiscalizacao.loc[condition_letreiro, 'Horario_Irregularidade']
+
+
+# Renomear colunas
+dfRetorno.rename(columns={'Horário de verificação:': 'Horario_Retorno', 'Data da fiscalização dd/mm/aaaa': 'Data'}, inplace=True)
+
+# Fazer merge dos DataFrames
+merged_df = pd.merge(dfFiscalizacao, dfRetorno, on=['Veículo', 'Data'], how='inner')
+
+# Selecionar colunas desejadas
+result_df = merged_df[['Veículo', 'Data', 'Horario_Irregularidade', 'Horario_Retorno', 'Tipo_Irregularidade']]
+
+
+#segunda planilha
+mcoCaminho = "caminho da planilha 2"
+mco = pd.read_csv(mcoCaminho, delimiter=";")
+dfMco = pd.DataFrame(mco)
+dfMco.rename(columns={' VEICULO': 'Veículo', ' VIAGEM': 'Data'}, inplace = True)
+colunasApagarMco = [' CONCESSIONARIA', ' CATRACA SAIDA', ' CATRACA CHEGADA',
+       ' OCORRENCIA', ' JUSTIFICATIVA', ' TIPO DIA', ' EXTENSAO',
+       ' FALHA MECANICA', ' EVENTO INSEGURO', ' INDICADOR FECHAMENTO',
+       ' DATA FECHAMENTO', ' TOTAL USUARIOS', ' EMPRESA OPERADORA', ' ']
+dfMco = dfMco.drop(columns=colunasApagarMco)
+
+# Convert 'Horario_Irregularidade' and 'Horario_Retorno' columns to datetime format
+result_df['Horario_Irregularidade'] = pd.to_datetime(result_df['Horario_Irregularidade'], format='%H:%M:%S', errors='coerce')
+
+
+# Extract only the minute and hour from the datetime columns
+# result_df['Horario_Irregularidade'] = result_df['Horario_Irregularidade'].dt.strftime('%H:%M')
+
+
+dfMco['Veículo'] = dfMco['Veículo'].astype(str)
+result_df['Horario_Saida_MCO'] = None  # Inicializa a coluna com None
+dfMco[" SAIDA"] = pd.to_datetime(dfMco[" SAIDA"], format='%H:%M')
+dfMco[" CHEGADA"] = pd.to_datetime(dfMco[" CHEGADA"], format='%H:%M')
+
+for index, row in result_df.iterrows():
+    filtro_condicional = (
+        (dfMco['Veículo'] == row['Veículo']) &
+        (dfMco['Data'] == row['Data']) 
+
+    )
+    
+    filtrosdelinha = dfMco[filtro_condicional]
+    filtrosdelinha = filtrosdelinha.reset_index(drop=True)
+
+    if not filtrosdelinha.empty:
+        # filtrosdelinha[' SAIDA'] = pd.to_datetime(filtrosdelinha[' SAIDA'], format='%H:%M')
+        # filtrosdelinha[' CHEGADA'] = pd.to_datetime(filtrosdelinha[' CHEGADA'], format='%H:%M')
+        # row['Horario_Irregularidade'] = pd.to_datetime(row['Horario_Irregularidade'], format='%H:%M')
+        
+
+        difdetempo = abs(filtrosdelinha[' SAIDA'] - row['Horario_Irregularidade'])
+        min_diferenca = difdetempo.idxmin()
+
+        # print(row['Horario_Irregularidade'],min_diferenca )
+        # print(filtrosdelinha)
+
+        filtro_condicional2 = (
+        (dfMco['Veículo'] == row['Veículo']) &
+        (dfMco['Data'] == row['Data']) &
+        (dfMco[' SAIDA'] <= row['Horario_Irregularidade']) &
+        (dfMco[' CHEGADA'] >= row['Horario_Irregularidade'])
+        )
+        if not dfMco[filtro_condicional2].empty:
+            result_df.at[index, 'Horario_Saida_MCO'] = dfMco[filtro_condicional2][' SAIDA'].iat[0]
+        elif row['Horario_Irregularidade'] <= filtrosdelinha.loc[min_diferenca, ' CHEGADA']:
+            horarioperto = filtrosdelinha.loc[min_diferenca, ' SAIDA']
+            result_df.at[index, 'Horario_Saida_MCO'] = horarioperto.strftime('%H:%M')
+        else:
+            horarioperto = filtrosdelinha.loc[min_diferenca+1, ' SAIDA']
+            result_df.at[index, 'Horario_Saida_MCO'] = horarioperto.strftime('%H:%M')
+
+
+# print(result_df[result_df['Veículo']=="10728"])
+
+
+
+dfMco["Data"] = pd.to_datetime(dfMco["Data"],dayfirst=True).dt.date
+result_df["Data"] = pd.to_datetime(result_df["Data"],dayfirst=True).dt.date
+dfMco[" SAIDA"] = pd.to_datetime(dfMco[" SAIDA"], format='%H:%M').dt.time
+result_df["Horario_Saida_MCO"] = pd.to_datetime(result_df["Horario_Saida_MCO"], format='%H:%M').dt.time
+result_df["Horario_Retorno"] = pd.to_datetime(result_df["Horario_Retorno"], format='%H:%M:%S').dt.time
+result_df = result_df.sort_values(by=["Data"]).reset_index(drop=True)
+mcoFisc = pd.DataFrame({})
+dfMco['PK'] = dfMco['Veículo'].astype(str).str.replace(".0", "") + dfMco['Data'].astype(str).str.replace("-", "")+ dfMco[" SAIDA"].astype(str).str[0:5].str.replace(":", "")
+for _, row_result in result_df.iterrows():
+    horario_saida_mco = row_result['Horario_Saida_MCO']
+    horario_retorno = row_result['Horario_Retorno']
+    filtro = (dfMco['Veículo'] == row_result['Veículo']) & ((dfMco['Data'] == row_result['Data'])) & ((dfMco[" SAIDA"] >= horario_saida_mco) & (dfMco[" SAIDA"] <= horario_retorno))
+    # print(row_result)
+    if len(dfMco[filtro]) > 0:
+        mcoFisc = pd.concat([mcoFisc,dfMco[filtro]])
+        # print(mcoFisc)
+   
+
+                
+
+
